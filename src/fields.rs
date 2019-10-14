@@ -58,6 +58,17 @@ pub enum TransferType {
     Interrupt,
 }
 
+impl TransferType {
+    pub fn as_raw(&self) -> u8 {
+        match self {
+            Self::Control => LIBUSB_TRANSFER_TYPE_CONTROL,
+            Self::Isochronous => LIBUSB_TRANSFER_TYPE_ISOCHRONOUS,
+            Self::Bulk => LIBUSB_TRANSFER_TYPE_BULK,
+            Self::Interrupt => LIBUSB_TRANSFER_TYPE_INTERRUPT,
+        }
+    }
+}
+
 /// Isochronous synchronization mode.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum SyncType {

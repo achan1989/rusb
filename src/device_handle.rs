@@ -14,6 +14,8 @@ use crate::{
     UsbContext,
 };
 
+const NO_ISO_PACKETS: u16 = 0;
+
 /// A handle to an open USB device.
 #[derive(Eq, PartialEq)]
 pub struct DeviceHandle<T: UsbContext> {
@@ -204,6 +206,22 @@ impl<T: UsbContext> DeviceHandle<T> {
                 err => Err(error::from_libusb(err)),
             }
         }
+    }
+
+    #[cfg(feature = "asynchronous")]
+    pub fn read_interrupt_async(
+        &self, endpoint: u8, length: usize,
+    ) // -> todo {
+    {
+        if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN {
+            return Err(Error::InvalidParam);
+        }
+        let length = BufferLength::try_from(length)?;
+
+        let mut transfer = Transfer::new(NO_ISO_PACKETS);
+        transfer.fill_interrupt(todo);
+
+        unimplemented!();
     }
 
     /// Writes to an interrupt endpoint.

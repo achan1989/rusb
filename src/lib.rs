@@ -41,6 +41,7 @@ mod endpoint_descriptor;
 mod fields;
 mod interface_descriptor;
 mod language;
+mod transfer;
 
 /// Tests whether the running `libusb` library supports capability API.
 pub fn has_capability() -> bool {

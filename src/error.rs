@@ -47,6 +47,9 @@ pub enum Error {
     /// Operation not supported or unimplemented on this platform.
     NotSupported,
 
+    /// Operation cannot be performed in this state.
+    BadState,
+
     /// Other error.
     Other,
 }
@@ -68,6 +71,7 @@ impl Error {
             Error::Interrupted => "System call interrupted (perhaps due to signal)",
             Error::NoMem => "Insufficient memory",
             Error::NotSupported => "Operation not supported or unimplemented on this platform",
+            Error::BadState => "Operation cannot be performed in this state",
             Error::Other => "Other error",
         }
     }
