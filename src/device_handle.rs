@@ -1,4 +1,4 @@
-use std::{mem, ptr::NonNull, slice, time::Duration};
+use std::{convert::TryFrom, mem, ptr::NonNull, slice, time::Duration};
 
 use bit_set::BitSet;
 use libc::{c_int, c_uchar, c_uint};
@@ -13,6 +13,9 @@ use crate::{
     language::Language,
     UsbContext,
 };
+
+#[cfg(feature = "asynchronous")]
+use crate::transfer::{ReadEndpoint, ReadLength, Timeout, Transfer};
 
 const NO_ISO_PACKETS: u16 = 0;
 
@@ -210,16 +213,15 @@ impl<T: UsbContext> DeviceHandle<T> {
 
     #[cfg(feature = "asynchronous")]
     pub fn read_interrupt_async(
-        &self, endpoint: u8, length: usize,
-    ) // -> todo {
+        &self, endpoint: u8, length: usize, timeout: Duration,
+    ) -> crate::Result<Transfer>
     {
-        if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN {
-            return Err(Error::InvalidParam);
-        }
-        let length = BufferLength::try_from(length)?;
+        let endpoint = ReadEndpoint::try_from(endpoint)?;
+        let length = ReadLength::try_from(length)?;
+        let timeout = Timeout::try_from(timeout)?;
 
-        let mut transfer = Transfer::new(NO_ISO_PACKETS);
-        transfer.fill_interrupt(todo);
+        let transfer = Transfer::new(NO_ISO_PACKETS)
+            .fill_interrupt_read(&self, endpoint, length, timeout);
 
         unimplemented!();
     }

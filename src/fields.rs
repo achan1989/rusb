@@ -1,4 +1,4 @@
-use libc::c_int;
+use libc::{c_int, c_uchar};
 use libusb1_sys::constants::*;
 
 /// Device speeds. Indicates the speed at which a device is operating.
@@ -59,7 +59,7 @@ pub enum TransferType {
 }
 
 impl TransferType {
-    pub fn as_raw(&self) -> u8 {
+    pub fn as_raw(&self) -> c_uchar {
         match self {
             Self::Control => LIBUSB_TRANSFER_TYPE_CONTROL,
             Self::Isochronous => LIBUSB_TRANSFER_TYPE_ISOCHRONOUS,

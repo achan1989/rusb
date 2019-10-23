@@ -50,6 +50,9 @@ pub enum Error {
     /// Operation cannot be performed in this state.
     BadState,
 
+    /// Length of data is too big.
+    TooBig,
+
     /// Other error.
     Other,
 }
@@ -72,6 +75,7 @@ impl Error {
             Error::NoMem => "Insufficient memory",
             Error::NotSupported => "Operation not supported or unimplemented on this platform",
             Error::BadState => "Operation cannot be performed in this state",
+            Error::TooBig => "Length of data is too big",
             Error::Other => "Other error",
         }
     }

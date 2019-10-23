@@ -12,51 +12,68 @@ use libusb1_sys::{constants::*, *};
 use crate::{
     device_handle::DeviceHandle,
     error::Error,
+    fields::{Direction, Recipient, RequestType, TransferType},
     UsbContext,
 };
 
 const CLEAR_TRANSFER_FLAGS: u8 = 0;
+const FILL_WITH_ZERO: u8 = 0;
+const CONTROL_SETUP_SIZE: usize = 8;
 
 
 #[derive(Debug, Copy, Clone)]
-enum TransferKind {
-    Unfilled,
-    Bulk,
-    Control,
-    Interrupt,
-    // Isochronous,
-}
+pub struct ReadLength(c_int);
 
-
-#[derive(Debug, Copy, Clone)]
-pub struct BufferLength(c_int);
-
-impl BufferLength {
-    fn as_c_int(&self) -> c_int {
+impl ReadLength {
+    pub fn as_c_int(&self) -> c_int {
         self.0
     }
 
-    fn as_usize(&self) -> usize {
+    pub fn as_usize(&self) -> usize {
         self.0 as usize
     }
 }
 
-impl TryFrom<usize> for BufferLength {
+impl TryFrom<usize> for ReadLength {
     type Error = Error;
 
-    fn try_from(n: usize) -> Result<BufferLength, Error> {
+    fn try_from(n: usize) -> Result<ReadLength, Error> {
         match c_int::try_from(n) {
-             Ok(len) => Ok(BufferLength(len)),
-             Err(_) => Err(Error::InvalidParam)
+             Ok(len) => Ok(ReadLength(len)),
+             Err(_) => Err(Error::TooBig)
          }
     }
 }
 
 
-#[derive(Debug, Copy, Clone)]
-struct BufferInfo {
-    pointer: Option<*mut u8>,
-    length: usize,
+#[derive(Debug)]
+pub struct WriteData<'a>(&'a [u8]);
+
+impl<'a> TryFrom<&'a [u8]> for WriteData<'a> {
+    type Error = Error;
+
+    fn try_from(data: &[u8]) -> Result<WriteData<'_>, Error> {
+        match c_int::try_from(data.len()) {
+            Ok(_) => Ok(WriteData(data)),
+            Err(_) => Err(Error::TooBig),
+        }
+    }
+}
+
+impl<'a> WriteData<'a> {
+    pub fn length(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn length_as_c_int(&self) -> c_int {
+        self.0.len() as c_int
+    }
+
+    fn copy_data(&self, buffer: &mut [u8]) {
+        if self.length() > 0 {
+            buffer.copy_from_slice(self.0);
+        }
+    }
 }
 
 
@@ -64,12 +81,16 @@ struct BufferInfo {
 pub struct Timeout(c_uint);
 
 impl Timeout {
-    fn value(&self) -> c_uint {
+    pub fn as_c_uint(&self) -> c_uint {
         self.0
     }
 
-    fn none() -> Self {
+    pub fn none() -> Self {
         Self(0)
+    }
+
+    pub fn from_millis(ms: u32) -> Self {
+        Self(ms)
     }
 }
 
@@ -85,217 +106,426 @@ impl TryFrom<Duration> for Timeout {
 }
 
 
-#[derive(Debug, Copy, Clone)]
-pub struct ControlSetup {
-    pub request_type: u8,
-    pub request: u8,
-    pub value: u16,
-    pub index: u16,
-    pub data_length: u16,
+#[derive(Debug)]
+pub struct ReadEndpoint(u8);
+
+impl TryFrom<u8> for ReadEndpoint {
+    type Error = Error;
+
+    fn try_from(endpoint: u8) -> Result<ReadEndpoint, Error> {
+        match endpoint & LIBUSB_ENDPOINT_DIR_MASK {
+            LIBUSB_ENDPOINT_IN => Ok(ReadEndpoint(endpoint)),
+            _ => Err(Error::InvalidParam)
+        }
+    }
 }
 
-impl ControlSetup {
-    pub const fn packet_length() -> usize {
-        8
+impl ReadEndpoint {
+    pub fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Debug)]
+pub struct WriteEndpoint(u8);
+
+impl TryFrom<u8> for WriteEndpoint {
+    type Error = Error;
+
+    fn try_from(endpoint: u8) -> Result<WriteEndpoint, Error> {
+        match endpoint & LIBUSB_ENDPOINT_DIR_MASK {
+            LIBUSB_ENDPOINT_OUT => Ok(WriteEndpoint(endpoint)),
+            _ => Err(Error::InvalidParam)
+        }
+    }
+}
+
+impl WriteEndpoint {
+    pub fn as_u8(&self) -> u8 {
+        self.0
     }
 }
 
 
 #[derive(Debug)]
-// pub struct Transfer<T: UsbContext> {
-pub struct Transfer {
-    // _context: T,
-    handle: NonNull<libusb_transfer>,
-    max_iso_packets: u16,
-    kind: TransferKind,
+pub struct ControlReadSetup {
+    request_type: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+    data_length: u16,
 }
 
-// impl<T: UsbContext> Transfer<T> {
+impl ControlReadSetup {
+    pub fn new(
+        recipient: Recipient,
+        request_type: RequestType,
+        request: u8,
+        value: u16,
+        index: u16,
+        data_length: u16,
+    ) -> Result<ControlReadSetup, Error>
+    {
+        match is_valid_control_data_length(data_length as usize) {
+            true => {
+                let request_type_byte = crate::fields::request_type(
+                    Direction::In, request_type, recipient);
+                Ok(ControlReadSetup{
+                    request_type: request_type_byte, request, value, index, data_length})
+            },
+            false => Err(Error::TooBig),
+        }
+    }
+
+    pub fn data_length(&self) -> u16 {
+        self.data_length
+    }
+
+    pub fn total_length(&self) -> usize {
+        self.data_length as usize + CONTROL_SETUP_SIZE
+    }
+
+    pub fn total_length_as_c_int(&self) -> c_int {
+        self.total_length() as c_int
+    }
+
+    fn write_setup_packet(&self, buffer: &mut [u8]) {
+        buffer[0] = self.request_type;
+        buffer[1] = self.request;
+        buffer[2..=3].copy_from_slice(&self.value.to_le_bytes()[..]);
+        buffer[4..=5].copy_from_slice(&self.index.to_le_bytes()[..]);
+        buffer[6..=7].copy_from_slice(&self.data_length.to_le_bytes()[..]);
+    }
+}
+
+#[derive(Debug)]
+pub struct ControlWriteSetup<'a> {
+    request_type: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+    data: &'a [u8],
+}
+
+impl<'a> ControlWriteSetup<'a> {
+    pub fn new(
+        recipient: Recipient,
+        request_type: RequestType,
+        request: u8,
+        value: u16,
+        index: u16,
+        data: &[u8],
+    ) -> Result<ControlWriteSetup, Error>
+    {
+        let data_length = data.len();
+        match is_valid_control_data_length(data_length) {
+            true => {
+                let request_type_byte = crate::fields::request_type(
+                    Direction::Out, request_type, recipient);
+                Ok(ControlWriteSetup{
+                    request_type: request_type_byte, request, value, index, data})
+            },
+            false => Err(Error::TooBig),
+        }
+    }
+
+    pub fn data_length(&self) -> u16 {
+        self.data.len() as u16
+    }
+
+    pub fn total_length(&self) -> usize {
+        self.data.len() + CONTROL_SETUP_SIZE
+    }
+
+    pub fn total_length_as_c_int(&self) -> c_int {
+        self.total_length() as c_int
+    }
+
+    fn write_setup_packet(&self, buffer: &mut [u8]) {
+        buffer[0] = self.request_type;
+        buffer[1] = self.request;
+        buffer[2..=3].copy_from_slice(&self.value.to_le_bytes()[..]);
+        buffer[4..=5].copy_from_slice(&self.index.to_le_bytes()[..]);
+        buffer[6..=7].copy_from_slice(&self.data_length().to_le_bytes()[..]);
+    }
+
+    fn copy_body_data(&self, buffer: &mut [u8]) {
+        if self.data_length() > 0 {
+            buffer.copy_from_slice(self.data);
+        }
+    }
+}
+
+
+#[derive(Debug)]
+pub enum Transfer {
+    Unfilled(UnfilledTransfer),
+    ReadBulk(ReadTransfer),
+    WriteBulk(WriteTransfer),
+    ReadControl(ReadTransfer),
+    WriteControl(WriteTransfer),
+    ReadInterrupt(ReadTransfer),
+    WriteInterrupt(WriteTransfer),
+    // ReadIsochronous(TransferInternal),
+    // WriteIsochronous(TransferInternal),
+}
+
 impl Transfer {
     pub fn new(max_iso_packets: u16) -> Self {
+        Self::Unfilled(UnfilledTransfer::new(max_iso_packets))
+    }
+}
+
+#[derive(Debug)]
+pub struct UnfilledTransfer {
+    inner: Internals,
+}
+
+impl UnfilledTransfer {
+    fn new(max_iso_packets: u16) -> Self {
+        Self{inner: Internals::new_unfilled(max_iso_packets)}
+    }
+
+    pub fn fill_bulk_read<T: UsbContext>(
+        mut self,
+        device_handle: &DeviceHandle<T>,
+        endpoint: ReadEndpoint,
+        length: ReadLength,
+        timeout: Timeout
+    ) -> Transfer {
+        unsafe {
+            self.inner.set_transfer_type(TransferType::Bulk);
+            self.inner.set_device_handle(device_handle);
+            self.inner.set_endpoint(endpoint.as_u8());
+            self.inner.setup_read(length);
+            self.inner.set_timeout(timeout);
+            Transfer::ReadBulk(ReadTransfer{inner: self.inner})
+        }
+    }
+
+    pub fn fill_bulk_write<T: UsbContext>(
+        mut self,
+        device_handle: &DeviceHandle<T>,
+        endpoint: WriteEndpoint,
+        data: &WriteData,
+        timeout: Timeout
+    ) -> Transfer {
+        unsafe {
+            self.inner.set_transfer_type(TransferType::Bulk);
+            self.inner.set_device_handle(device_handle);
+            self.inner.set_endpoint(endpoint.as_u8());
+            self.inner.setup_write(data);
+            self.inner.set_timeout(timeout);
+            Transfer::WriteBulk(WriteTransfer{inner: self.inner})
+        }
+    }
+
+    pub fn fill_interrupt_read<T: UsbContext>(
+        mut self,
+        device_handle: &DeviceHandle<T>,
+        endpoint: ReadEndpoint,
+        length: ReadLength,
+        timeout: Timeout
+    ) -> Transfer {
+        unsafe {
+            self.inner.set_transfer_type(TransferType::Interrupt);
+            self.inner.set_device_handle(device_handle);
+            self.inner.set_endpoint(endpoint.as_u8());
+            self.inner.setup_read(length);
+            self.inner.set_timeout(timeout);
+            Transfer::ReadInterrupt(ReadTransfer{inner: self.inner})
+        }
+    }
+
+    pub fn fill_interrupt_write<T: UsbContext>(
+        mut self,
+        device_handle: &DeviceHandle<T>,
+        endpoint: WriteEndpoint,
+        data: &WriteData,
+        timeout: Timeout
+    ) -> Transfer {
+        unsafe {
+            self.inner.set_transfer_type(TransferType::Interrupt);
+            self.inner.set_device_handle(device_handle);
+            self.inner.set_endpoint(endpoint.as_u8());
+            self.inner.setup_write(data);
+            self.inner.set_timeout(timeout);
+            Transfer::WriteInterrupt(WriteTransfer{inner: self.inner})
+        }
+    }
+
+    pub fn fill_control_read<T: UsbContext>(
+        mut self,
+        device_handle: &DeviceHandle<T>,
+        setup: &ControlReadSetup,
+        timeout: Timeout
+    ) -> Transfer {
+        unsafe {
+            self.inner.set_transfer_type(TransferType::Control);
+            self.inner.set_device_handle(device_handle);
+            self.inner.set_endpoint(0);
+            self.inner.setup_control_read(setup);
+            self.inner.set_timeout(timeout);
+            Transfer::ReadControl(ReadTransfer{inner: self.inner})
+        }
+    }
+
+    pub fn fill_control_write<T: UsbContext>(
+        mut self,
+        device_handle: &DeviceHandle<T>,
+        setup: &ControlWriteSetup,
+        timeout: Timeout
+    ) -> Transfer {
+        unsafe {
+            self.inner.set_transfer_type(TransferType::Control);
+            self.inner.set_device_handle(device_handle);
+            self.inner.set_endpoint(0);
+            self.inner.setup_control_write(setup);
+            self.inner.set_timeout(timeout);
+            Transfer::WriteControl(WriteTransfer{inner: self.inner})
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ReadTransfer {
+    inner: Internals,
+}
+
+impl ReadTransfer {
+    pub fn clear(self) -> Transfer {
+        Transfer::Unfilled(UnfilledTransfer{inner: self.inner})
+    }
+
+    pub fn clear_and_shrink(mut self) -> Transfer {
+        unsafe { self.inner.shrink(); }
+        Transfer::Unfilled(UnfilledTransfer{inner: self.inner})
+    }
+}
+
+#[derive(Debug)]
+pub struct WriteTransfer {
+    inner: Internals,
+}
+
+impl WriteTransfer {
+    pub fn clear(self) -> Transfer {
+        Transfer::Unfilled(UnfilledTransfer{inner: self.inner})
+    }
+
+    pub fn clear_and_shrink(mut self) -> Transfer {
+        unsafe { self.inner.shrink(); }
+        Transfer::Unfilled(UnfilledTransfer{inner: self.inner})
+    }
+}
+
+#[derive(Debug)]
+struct Internals {
+    handle: NonNull<libusb_transfer>,
+    max_iso_packets: u16,
+    buffer: Vec<u8>,
+}
+
+impl Internals {
+    fn new_unfilled(max_iso_packets: u16) -> Self {
         let mut handle = unsafe {
             let ptr = libusb_alloc_transfer(max_iso_packets.into());
             NonNull::new(ptr).expect("alloc failed")
+            // TODO: should this return a Result instead of panicking on OOM?
+            // Probably not, since a transfer is small. If that fails we're
+            // in real trouble.
         };
 
         unsafe { handle.as_mut().flags = CLEAR_TRANSFER_FLAGS; }
 
-        Self {handle, max_iso_packets, kind: TransferKind::Unfilled}
-
         // TODO:
         // transfer->user_data = user_data;
         // transfer->callback = callback;
+
+        Self {handle, max_iso_packets, buffer: Vec::new()}
     }
 
-    fn as_raw(&self) -> *mut libusb_transfer {
-        self.handle.as_ptr()
+    unsafe fn set_device_handle<T: UsbContext>(&mut self, dh: &DeviceHandle<T>) {
+        let transfer = self.handle.as_mut();
+        transfer.dev_handle = dh.as_raw();
     }
 
-    pub fn get_buffer_mut<'a>(&'a mut self) -> Result<&'a mut[u8], Error> {
-        match self.kind {
-            TransferKind::Unfilled => return Err(Error::BadState),
-
-            TransferKind::Control => {
-                let transfer = self.as_raw();
-                unimplemented!();
-                // let pointer = unsafe { (*transfer).}
-            },
-
-            TransferKind::Bulk |
-            TransferKind::Interrupt => {
-                unimplemented!();
-            },
-        }
-
-        let info = self.current_buffer_info();
-
-        unimplemented!();
+    unsafe fn set_endpoint(&mut self, endpoint: u8) {
+        let transfer = self.handle.as_mut();
+        transfer.endpoint = endpoint;
     }
 
-    // TODO: set_out_data()
+    unsafe fn setup_read(&mut self, length: ReadLength) {
+        self.buffer.resize(length.as_usize(), FILL_WITH_ZERO);
 
-    pub fn fill_bulk<T: UsbContext>(
-        &mut self,
-        length: BufferLength,
-        device_handle: &DeviceHandle<T>,
-        endpoint: u8,
-        timeout: Timeout
-    ) -> Result<(), Error>
-    {
-        let transfer = self.as_raw();
-        unsafe {
-            self.setup_buffer(length)?;
-            (*transfer).dev_handle = device_handle.as_raw();
-            (*transfer).endpoint = endpoint;
-            (*transfer).transfer_type = LIBUSB_TRANSFER_TYPE_BULK;
-            (*transfer).timeout = timeout.value();
-        }
-        self.kind = TransferKind::Bulk;
-        Ok(())
+        let transfer = self.handle.as_mut();
+        transfer.length = length.as_c_int();
+        transfer.buffer = self.buffer.as_mut_ptr();
     }
 
-    pub fn fill_control<T: UsbContext>(&mut self,
-        setup: &ControlSetup,
-        device_handle: &DeviceHandle<T>,
-        endpoint: u8,
-        timeout: Timeout
-    ) -> Result<(), Error>
-    {
-        let buffer_length = BufferLength::try_from(
-            ControlSetup::packet_length() + (setup.data_length as usize))?;
-        let transfer = self.as_raw();
-        unsafe {
-            self.setup_buffer(buffer_length)?;
-            (*transfer).dev_handle = device_handle.as_raw();
-            (*transfer).endpoint = endpoint;
-            (*transfer).transfer_type = LIBUSB_TRANSFER_TYPE_CONTROL;
-            (*transfer).timeout = timeout.value();
-            self.fill_control_setup(&setup);
-        }
-        self.kind = TransferKind::Control;
-        Ok(())
+    unsafe fn setup_write(&mut self, data: &WriteData) {
+        self.buffer.resize(data.length(), FILL_WITH_ZERO);
+        data.copy_data(&mut self.buffer[0..data.length()]);
+
+        let transfer = self.handle.as_mut();
+        transfer.length = data.length_as_c_int();
+        transfer.buffer = self.buffer.as_mut_ptr();
     }
 
-    unsafe fn fill_control_setup(&mut self, setup: &ControlSetup) {
-        let transfer = self.as_raw();
-        let header = slice::from_raw_parts_mut(
-            (*transfer).buffer, ControlSetup::packet_length());
+    unsafe fn setup_control_read(&mut self, setup: &ControlReadSetup) {
+        self.buffer.resize(setup.total_length(), FILL_WITH_ZERO);
+        setup.write_setup_packet(&mut self.buffer[0..CONTROL_SETUP_SIZE]);
 
-        header[0] = setup.request_type;
-        header[1] = setup.request;
-        header[2..=3].copy_from_slice(&setup.value.to_le_bytes()[..]);
-        header[4..=5].copy_from_slice(&setup.index.to_le_bytes()[..]);
-        header[6..=7].copy_from_slice(&setup.data_length.to_le_bytes()[..]);
+        let transfer = self.handle.as_mut();
+        transfer.length = setup.total_length_as_c_int();
+        transfer.buffer = self.buffer.as_mut_ptr();
     }
 
-    pub fn fill_interrupt<T: UsbContext>(
-        &mut self,
-        length: BufferLength,
-        device_handle: &DeviceHandle<T>,
-        endpoint: u8,
-        timeout: Timeout
-    ) -> Result<(), Error>
-    {
-        let transfer = self.as_raw();
-        unsafe {
-            self.setup_buffer(length)?;
-            (*transfer).dev_handle = device_handle.as_raw();
-            (*transfer).endpoint = endpoint;
-            (*transfer).transfer_type = LIBUSB_TRANSFER_TYPE_INTERRUPT;
-            (*transfer).timeout = timeout.value();
-        }
-        self.kind = TransferKind::Interrupt;
-        Ok(())
+    unsafe fn setup_control_write(&mut self, setup: &ControlWriteSetup) {
+        self.buffer.resize(setup.total_length(), FILL_WITH_ZERO);
+        setup.write_setup_packet(&mut self.buffer[0..CONTROL_SETUP_SIZE]);
+        setup.copy_body_data(&mut self.buffer[CONTROL_SETUP_SIZE..]);
+
+        let transfer = self.handle.as_mut();
+        transfer.length = setup.total_length_as_c_int();
+        transfer.buffer = self.buffer.as_mut_ptr();
     }
 
-    unsafe fn setup_buffer(
-        &mut self, length: BufferLength
-    ) -> Result<(), Error>
-    {
-        // We can just re-use the existing buffer if it's big enough.
-        if self.must_allocate_for_buffer(length) {
-            // Allocate the new buffer before freeing the existing one.
-            // That way we are always in a valid state if allocation fails.
-            // Zero the buffer in case the user sends to the device without
-            // providing data -- prevents read of uninitialized memory.
-            let new_buffer = alloc_zeroed(
-                get_transfer_buffer_layout(length.as_usize()));
-            if new_buffer.is_null() {
-                return Err(Error::NoMem);
-            }
-            self.replace_buffer(new_buffer, length);
-        }
-        Ok(())
+    unsafe fn set_timeout(&mut self, t: Timeout) {
+        let transfer = self.handle.as_mut();
+        transfer.timeout = t.as_c_uint();
     }
 
-    unsafe fn replace_buffer(&mut self, new_buffer: *mut u8, length: BufferLength)
-    {
-        let transfer = self.as_raw();
-        let old_buffer = self.current_buffer_info();
-
-        (*transfer).buffer = new_buffer;
-        (*transfer).length = length.as_c_int();
-
-        if let Some(old_pointer) = old_buffer.pointer {
-            dealloc(old_pointer, get_transfer_buffer_layout(old_buffer.length));
-        }
+    unsafe fn set_transfer_type(&mut self, tt: TransferType) {
+        let transfer = self.handle.as_mut();
+        transfer.transfer_type = tt.as_raw();
     }
 
-    fn must_allocate_for_buffer(&self, length:BufferLength) -> bool {
-        let current_buffer_capacity = self.current_buffer_info().length;
-        current_buffer_capacity < length.as_usize()
-    }
+    unsafe fn shrink(&mut self) {
+        self.buffer.truncate(0);
+        self.buffer.shrink_to_fit();
 
-    fn current_buffer_info(&self) -> BufferInfo {
-        match self.kind {
-            TransferKind::Unfilled => BufferInfo{pointer: None, length: 0},
-
-            TransferKind::Bulk |
-            TransferKind::Control |
-            TransferKind::Interrupt => {
-                let transfer = self.as_raw();
-                let pointer = unsafe { Some((*transfer).buffer) };
-                let length = {
-                    let c_length = unsafe { (*transfer).length };
-                    if c_length < 0 {
-                        0
-                    } else {
-                        c_length as usize
-                    }
-                };
-                BufferInfo{pointer, length}
-            }
-        }
+        let transfer = self.handle.as_mut();
+        transfer.length = 0;
+        transfer.buffer = ptr::null_mut();
     }
 }
 
-impl Drop for Transfer {
+impl Drop for Internals {
     fn drop(&mut self) {
         unsafe { libusb_free_transfer(self.handle.as_ptr()); }
     }
 }
 
 
-fn get_transfer_buffer_layout(size: usize) -> Layout {
-    Layout::from_size_align(size, 2).expect("alloc failed")
+fn is_valid_control_data_length(data_length: usize) -> bool {
+    if data_length > (u16::max_value() as usize) {
+        return false;
+    }
+
+    let total_length = data_length + CONTROL_SETUP_SIZE;
+    match u16::try_from(total_length) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
 }

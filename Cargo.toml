@@ -14,6 +14,7 @@ edition = "2018"
 travis-ci = { repository = "a1ien/rusb" }
 
 [features]
+default = ["asynchronous"]
 asynchronous = []
 
 [dependencies]
