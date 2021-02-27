@@ -15,7 +15,7 @@ use crate::{
 };
 
 #[cfg(feature = "asynchronous")]
-use crate::transfer::{ReadEndpoint, ReadLength, Timeout, Transfer};
+use crate::transfer::{ReadEndpoint, ReadLength, Timeout, FilledTransfer, UnfilledTransfer};
 
 const NO_ISO_PACKETS: u16 = 0;
 
@@ -214,14 +214,17 @@ impl<T: UsbContext> DeviceHandle<T> {
     #[cfg(feature = "asynchronous")]
     pub fn read_interrupt_async(
         &self, endpoint: u8, length: usize, timeout: Duration,
-    ) -> crate::Result<Transfer>
+    ) -> crate::Result<()>
     {
         let endpoint = ReadEndpoint::try_from(endpoint)?;
         let length = ReadLength::try_from(length)?;
         let timeout = Timeout::try_from(timeout)?;
 
-        let transfer = Transfer::new(NO_ISO_PACKETS)
+        let transfer = UnfilledTransfer::new(NO_ISO_PACKETS)
             .fill_interrupt_read(&self, endpoint, length, timeout);
+
+        let mut transfers = self._context.get_transfers().lock().unwrap();
+        transfers.submit(transfer)?;
 
         unimplemented!();
     }

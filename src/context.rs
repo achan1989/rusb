@@ -1,12 +1,13 @@
 use libc::{c_int, c_void, timeval};
 
-use std::{mem, ptr, sync::Arc, sync::Once, time::Duration};
+use std::{mem, ptr, sync::{Arc, Mutex, Once}, time::Duration};
 
 use crate::{
     device::{self, Device},
     device_handle::{self, DeviceHandle},
     device_list::DeviceList,
-    error,
+    error::{self, Error},
+    transfer::FilledTransfer,
 };
 use libusb1_sys::{constants::*, *};
 
@@ -20,18 +21,52 @@ type Seconds = ::libc::time_t;
 #[cfg(not(windows))]
 type MicroSeconds = ::libc::suseconds_t;
 
-#[derive(Copy, Clone, Eq, PartialEq, Default)]
-pub struct GlobalContext {}
+pub struct OwnedTransfers {
+    list: Vec<FilledTransfer>,
+    limit: usize,
+}
+
+impl Default for OwnedTransfers {
+    fn default() -> Self {
+        let limit = 8;
+        Self{limit, list: Vec::with_capacity(limit)}
+    }
+}
+
+impl OwnedTransfers {
+    fn get_max_concurrent_transfers(&self) -> usize {
+        self.limit
+    }
+
+    fn set_max_concurrent_transfers(&mut self, limit: usize) -> crate::Result<()> {
+        match self.list.is_empty() {
+            true => {
+                self.limit = limit;
+                self.list.reserve_exact(limit);
+                Ok(())
+            },
+            false => Err(Error::Busy),
+        }
+    }
+
+    fn submit(&mut self, transfer: TODO) -> TODO {
+        todo;
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct GlobalContext(Context);
 
 /// A `libusb` context.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Context {
     context: Arc<ContextInner>,
 }
 
-#[derive(Eq, PartialEq)]
 struct ContextInner {
     inner: ptr::NonNull<libusb_context>,
+    #[cfg(feature = "asynchronous")]
+    transfers: Mutex<OwnedTransfers>,
 }
 
 impl Drop for ContextInner {
@@ -40,6 +75,12 @@ impl Drop for ContextInner {
         unsafe {
             libusb_exit(self.inner.as_ptr());
         }
+    }
+}
+
+impl PartialEq for ContextInner {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
     }
 }
 
@@ -53,7 +94,16 @@ pub trait Hotplug<T: UsbContext> {
 
 pub type Registration = c_int;
 
-pub trait UsbContext: Clone + Sized {
+mod internal {
+    use std::sync::Mutex;
+    use super::OwnedTransfers;
+
+    pub trait TransferOwner {
+        fn get_transfers(&self) -> &Mutex<OwnedTransfers>;
+    }
+}
+
+pub trait UsbContext: Clone + Sized + internal::TransferOwner {
     /// Get the raw libusb_context pointer, for advanced use in unsafe code.
     fn as_raw(&self) -> *mut libusb_context;
 
@@ -153,6 +203,18 @@ pub trait UsbContext: Clone + Sized {
             Ok(())
         }
     }
+
+    #[cfg(feature = "asynchronous")]
+    fn get_max_concurrent_transfers(&self) -> usize {
+        let mut transfers = self.get_transfers().lock().unwrap();
+        transfers.get_max_concurrent_transfers()
+    }
+
+    #[cfg(feature = "asynchronous")]
+    fn set_max_concurrent_transfers(&mut self, limit: usize) -> crate::Result<()> {
+        let mut transfers = self.get_transfers().lock().unwrap();
+        transfers.set_max_concurrent_transfers(limit)
+    }
 }
 
 impl UsbContext for Context {
@@ -163,23 +225,39 @@ impl UsbContext for Context {
 
 impl UsbContext for GlobalContext {
     fn as_raw(&self) -> *mut libusb_context {
-        static mut USB_CONTEXT: *mut libusb_context = ptr::null_mut();
+        self.0.as_raw()
+    }
+}
+
+impl internal::TransferOwner for Context {
+    #[cfg(feature = "asynchronous")]
+    fn get_transfers(&self) -> &Mutex<OwnedTransfers> {
+        &self.context.transfers
+    }
+}
+
+impl internal::TransferOwner for GlobalContext {
+    #[cfg(feature = "asynchronous")]
+    fn get_transfers(&self) -> &Mutex<OwnedTransfers> {
+        self.0.get_transfers()
+    }
+}
+
+impl Default for GlobalContext {
+    fn default() -> Self {
+        // A GlobalContext is just an anonymous Context that lives for the
+        // duration of the program.
+        static mut GC: mem::MaybeUninit<Context> = mem::MaybeUninit::uninit();
         static ONCE: Once = Once::new();
 
         ONCE.call_once(|| {
-            let mut context = mem::MaybeUninit::<*mut libusb_context>::uninit();
-            unsafe {
-                USB_CONTEXT = match libusb_init(context.as_mut_ptr()) {
-                    0 => context.assume_init(),
-                    err => panic!(
-                        "Can't init Global usb context, error {:?}",
-                        error::from_libusb(err)
-                    ),
-                }
+            match Context::new() {
+                Ok(ctx) => unsafe { GC.as_mut_ptr().write(ctx) },
+                Err(e) => panic!("Can't init Global usb context, error {:?}", e),
             };
         });
-        // Clone data that is safe to use concurrently.
-        unsafe { USB_CONTEXT }
+
+        unsafe { GlobalContext((*GC.as_ptr()).clone()) }
     }
 }
 
@@ -199,6 +277,8 @@ impl Context {
             context: unsafe {
                 Arc::new(ContextInner {
                     inner: ptr::NonNull::new_unchecked(context.assume_init()),
+                    #[cfg(feature = "asynchronous")]
+                    transfers: Mutex::new(OwnedTransfers::default()),
                 })
             },
         })

@@ -258,32 +258,18 @@ impl<'a> ControlWriteSetup<'a> {
 
 
 #[derive(Debug)]
-pub enum Transfer {
-    Unfilled(UnfilledTransfer),
-    ReadBulk(ReadTransfer),
-    WriteBulk(WriteTransfer),
-    ReadControl(ReadTransfer),
-    WriteControl(WriteTransfer),
-    ReadInterrupt(ReadTransfer),
-    WriteInterrupt(WriteTransfer),
-    // ReadIsochronous(TransferInternal),
-    // WriteIsochronous(TransferInternal),
-}
-
-impl Transfer {
-    pub fn new(max_iso_packets: u16) -> Self {
-        Self::Unfilled(UnfilledTransfer::new(max_iso_packets))
-    }
-}
+pub struct UnfilledTransfer(Transfer);
 
 #[derive(Debug)]
-pub struct UnfilledTransfer {
-    inner: Internals,
-}
+pub struct FilledTransfer(Transfer);
 
 impl UnfilledTransfer {
-    fn new(max_iso_packets: u16) -> Self {
-        Self{inner: Internals::new_unfilled(max_iso_packets)}
+    pub fn new(max_iso_packets: u16) -> Self {
+        Self(Transfer::new_unfilled(max_iso_packets))
+    }
+
+    pub fn shrink(&mut self) {
+        unsafe { self.0.shrink(); }
     }
 
     pub fn fill_bulk_read<T: UsbContext>(
@@ -292,14 +278,15 @@ impl UnfilledTransfer {
         endpoint: ReadEndpoint,
         length: ReadLength,
         timeout: Timeout
-    ) -> Transfer {
+    ) -> FilledTransfer {
+        let mut inner = self.0;
         unsafe {
-            self.inner.set_transfer_type(TransferType::Bulk);
-            self.inner.set_device_handle(device_handle);
-            self.inner.set_endpoint(endpoint.as_u8());
-            self.inner.setup_read(length);
-            self.inner.set_timeout(timeout);
-            Transfer::ReadBulk(ReadTransfer{inner: self.inner})
+            inner.set_transfer_type(TransferType::Bulk);
+            inner.set_device_handle(device_handle);
+            inner.set_endpoint(endpoint.as_u8());
+            inner.setup_read(length);
+            inner.set_timeout(timeout);
+            FilledTransfer(inner)
         }
     }
 
@@ -309,14 +296,15 @@ impl UnfilledTransfer {
         endpoint: WriteEndpoint,
         data: &WriteData,
         timeout: Timeout
-    ) -> Transfer {
+    ) -> FilledTransfer {
+        let mut inner = self.0;
         unsafe {
-            self.inner.set_transfer_type(TransferType::Bulk);
-            self.inner.set_device_handle(device_handle);
-            self.inner.set_endpoint(endpoint.as_u8());
-            self.inner.setup_write(data);
-            self.inner.set_timeout(timeout);
-            Transfer::WriteBulk(WriteTransfer{inner: self.inner})
+            inner.set_transfer_type(TransferType::Bulk);
+            inner.set_device_handle(device_handle);
+            inner.set_endpoint(endpoint.as_u8());
+            inner.setup_write(data);
+            inner.set_timeout(timeout);
+            FilledTransfer(inner)
         }
     }
 
@@ -326,14 +314,15 @@ impl UnfilledTransfer {
         endpoint: ReadEndpoint,
         length: ReadLength,
         timeout: Timeout
-    ) -> Transfer {
+    ) -> FilledTransfer {
+        let mut inner = self.0;
         unsafe {
-            self.inner.set_transfer_type(TransferType::Interrupt);
-            self.inner.set_device_handle(device_handle);
-            self.inner.set_endpoint(endpoint.as_u8());
-            self.inner.setup_read(length);
-            self.inner.set_timeout(timeout);
-            Transfer::ReadInterrupt(ReadTransfer{inner: self.inner})
+            inner.set_transfer_type(TransferType::Interrupt);
+            inner.set_device_handle(device_handle);
+            inner.set_endpoint(endpoint.as_u8());
+            inner.setup_read(length);
+            inner.set_timeout(timeout);
+            FilledTransfer(inner)
         }
     }
 
@@ -343,14 +332,15 @@ impl UnfilledTransfer {
         endpoint: WriteEndpoint,
         data: &WriteData,
         timeout: Timeout
-    ) -> Transfer {
+    ) -> FilledTransfer {
+        let mut inner = self.0;
         unsafe {
-            self.inner.set_transfer_type(TransferType::Interrupt);
-            self.inner.set_device_handle(device_handle);
-            self.inner.set_endpoint(endpoint.as_u8());
-            self.inner.setup_write(data);
-            self.inner.set_timeout(timeout);
-            Transfer::WriteInterrupt(WriteTransfer{inner: self.inner})
+            inner.set_transfer_type(TransferType::Interrupt);
+            inner.set_device_handle(device_handle);
+            inner.set_endpoint(endpoint.as_u8());
+            inner.setup_write(data);
+            inner.set_timeout(timeout);
+            FilledTransfer(inner)
         }
     }
 
@@ -359,14 +349,15 @@ impl UnfilledTransfer {
         device_handle: &DeviceHandle<T>,
         setup: &ControlReadSetup,
         timeout: Timeout
-    ) -> Transfer {
+    ) -> FilledTransfer {
+        let mut inner = self.0;
         unsafe {
-            self.inner.set_transfer_type(TransferType::Control);
-            self.inner.set_device_handle(device_handle);
-            self.inner.set_endpoint(0);
-            self.inner.setup_control_read(setup);
-            self.inner.set_timeout(timeout);
-            Transfer::ReadControl(ReadTransfer{inner: self.inner})
+            inner.set_transfer_type(TransferType::Control);
+            inner.set_device_handle(device_handle);
+            inner.set_endpoint(0);
+            inner.setup_control_read(setup);
+            inner.set_timeout(timeout);
+            FilledTransfer(inner)
         }
     }
 
@@ -375,58 +366,44 @@ impl UnfilledTransfer {
         device_handle: &DeviceHandle<T>,
         setup: &ControlWriteSetup,
         timeout: Timeout
-    ) -> Transfer {
+    ) -> FilledTransfer {
+        let mut inner = self.0;
         unsafe {
-            self.inner.set_transfer_type(TransferType::Control);
-            self.inner.set_device_handle(device_handle);
-            self.inner.set_endpoint(0);
-            self.inner.setup_control_write(setup);
-            self.inner.set_timeout(timeout);
-            Transfer::WriteControl(WriteTransfer{inner: self.inner})
+            inner.set_transfer_type(TransferType::Control);
+            inner.set_device_handle(device_handle);
+            inner.set_endpoint(0);
+            inner.setup_control_write(setup);
+            inner.set_timeout(timeout);
+            FilledTransfer(inner)
         }
     }
 }
 
-#[derive(Debug)]
-pub struct ReadTransfer {
-    inner: Internals,
-}
 
-impl ReadTransfer {
-    pub fn clear(self) -> Transfer {
-        Transfer::Unfilled(UnfilledTransfer{inner: self.inner})
+impl FilledTransfer {
+    pub fn clear(self) -> UnfilledTransfer {
+        UnfilledTransfer(self.0)
     }
 
-    pub fn clear_and_shrink(mut self) -> Transfer {
-        unsafe { self.inner.shrink(); }
-        Transfer::Unfilled(UnfilledTransfer{inner: self.inner})
+    pub fn clear_and_shrink(mut self) -> UnfilledTransfer {
+        unsafe { self.0.shrink(); }
+        UnfilledTransfer(self.0)
     }
 }
+
 
 #[derive(Debug)]
-pub struct WriteTransfer {
-    inner: Internals,
-}
-
-impl WriteTransfer {
-    pub fn clear(self) -> Transfer {
-        Transfer::Unfilled(UnfilledTransfer{inner: self.inner})
-    }
-
-    pub fn clear_and_shrink(mut self) -> Transfer {
-        unsafe { self.inner.shrink(); }
-        Transfer::Unfilled(UnfilledTransfer{inner: self.inner})
-    }
-}
-
-#[derive(Debug)]
-struct Internals {
+struct Transfer {
     handle: NonNull<libusb_transfer>,
     max_iso_packets: u16,
     buffer: Vec<u8>,
 }
 
-impl Internals {
+// impl PartialEq for Transfer {
+//     // add code here
+// }
+
+impl Transfer {
     fn new_unfilled(max_iso_packets: u16) -> Self {
         let mut handle = unsafe {
             let ptr = libusb_alloc_transfer(max_iso_packets.into());
@@ -511,7 +488,7 @@ impl Internals {
     }
 }
 
-impl Drop for Internals {
+impl Drop for Transfer {
     fn drop(&mut self) {
         unsafe { libusb_free_transfer(self.handle.as_ptr()); }
     }
